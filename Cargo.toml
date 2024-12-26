@@ -1,0 +1,68 @@
+[package]
+name = "bedroom_lights3"
+version = "0.1.0"
+authors = ["Aron Granberg <aron.granberg@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.77"
+
+[[bin]]
+name = "bedroom_lights3"
+harness = false          # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[profile.release]
+opt-level = "s"
+# strip = "none"
+strip = true # Automatically strip symbols from the binary.
+lto = true
+
+[profile.dev]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "z"
+
+[features]
+default = ["std", "embassy", "esp-idf-svc/native"]
+
+pio = ["esp-idf-svc/pio"]
+std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
+alloc = ["esp-idf-svc/alloc"]
+nightly = ["esp-idf-svc/nightly"]
+experimental = ["esp-idf-svc/experimental"]
+embassy = [
+    "esp-idf-svc/embassy-sync",
+    "esp-idf-svc/critical-section",
+    "esp-idf-svc/embassy-time-driver",
+]
+
+[dependencies]
+log = { version = "0.4", default-features = false }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", default-features = false }
+# esp-idf-sys = { version = "0.35", features = ["binstart"] }
+anyhow = "1.0"
+serde = { version = "*", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+sync_common = { path = "../sync_common" }
+embassy-futures = "0.1"
+brevduva = { git = "https://github.com/HalfVoxel/brevduva.git", features = [
+    "embedded",
+] }
+smart-leds = "*"
+smart-leds-trait = { version = "*" }
+ws2812-esp32-rmt-driver = { version = "*", features = ["smart-leds-trait"] }
+
+[patch.crates-io]
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
+
+# Patch esp-idf-svc dependency
+# [patch.crates-io.esp-idf-svc]
+# path = "../esp-idf-svc"
+
+# [patch.crates-io.esp-idf-hal]
+# path = "../esp-idf-hal"
+
+# tungstenite = { version = "0.23" }
+# esp-wifi = { version = "0.7", features = ["esp32", "wifi"] }
+# esp-hal = { version = "0.19", features = ["esp32"] }
+
+[build-dependencies]
+embuild = "0.32.0"
