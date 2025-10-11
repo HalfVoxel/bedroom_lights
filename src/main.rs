@@ -3,18 +3,21 @@ mod esp;
 mod wifi;
 mod wokwi;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use brevduva::SyncStorage;
+use brevduva::{channel::SerializationFormat, ReadWriteMode, SyncStorage};
+use chrono::{DateTime, FixedOffset, TimeZone, Timelike, Utc};
 use esp::init_esp;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{
         ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver},
         prelude::*,
-        task::current,
     },
     nvs::EspDefaultNvsPartition,
+    ota::EspOta,
+    sntp::EspSntp,
+    sys::EspError,
     timer::EspTaskTimerService,
 };
 use log::{error, info, warn};
@@ -29,12 +32,35 @@ const MQTT_CLIENT_ID: &str = "bedroom_lights";
 const MQTT_USERNAME: &str = "wakeup_alarm";
 const MQTT_PASSWORD: &str = "xafzz25nomehasff";
 
-fn main() -> anyhow::Result<()> {
-    // env_logger::builder()
-    //     .filter_level(log::LevelFilter::Trace)
-    //     .init();
-    esp_idf_svc::log::set_target_level("brevduva", log::LevelFilter::Trace).unwrap();
+struct Logger {}
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Trace
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            println!("{} - {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: Logger = Logger {};
+
+fn main() {
     init_esp();
+
+    warn!(
+        "ESP max log level={:?} log crate max level={:?}",
+        esp_idf_svc::log::EspLogger::default().get_max_level(),
+        log::STATIC_MAX_LEVEL
+    );
+    esp_idf_svc::log::set_target_level("*", log::LevelFilter::Info).unwrap();
+    esp_idf_svc::log::set_target_level("brevduva", log::LevelFilter::Trace).unwrap();
+    esp_idf_svc::log::set_target_level("bedroom_lights3", log::LevelFilter::Trace).unwrap();
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -42,12 +68,6 @@ fn main() -> anyhow::Result<()> {
         .unwrap()
         .block_on(async_main())
         .unwrap();
-
-    info!("Shutting down in 5s...");
-
-    std::thread::sleep(core::time::Duration::from_secs(5));
-
-    Ok(())
 }
 
 struct DebugLed {
@@ -59,13 +79,13 @@ impl DebugLed {
         Self { driver }
     }
 
-    fn set_duty(&mut self, duty: f32) -> anyhow::Result<()> {
+    fn set_duty(&mut self, duty: f32) -> Result<(), EspError> {
         self.driver
             .set_duty((duty * self.driver.get_max_duty() as f32).round() as u32)?;
         Ok(())
     }
 
-    async fn blink(&mut self, times: usize, period: Duration) -> anyhow::Result<()> {
+    async fn blink(&mut self, times: usize, period: Duration) -> Result<(), EspError> {
         for _ in 0..times {
             self.set_duty(1.0)?;
             tokio::time::sleep(period).await;
@@ -76,7 +96,35 @@ impl DebugLed {
     }
 }
 
-async fn async_main() -> anyhow::Result<()> {
+fn successful_boot() {
+    let mut ota = EspOta::new().expect("obtain OTA instance");
+    ota.mark_running_slot_valid().expect("mark app as valid");
+}
+
+const SUNRISE_ANIMATION: &[(f32, [f32; 4])] = &[
+    (0.0f32, [0.0, 0.0, 0.0, 0.0]),
+    (1.0 * 60.0, [255.0, 70.0, 0.0, 0.0]),
+    (3.0 * 60.0, [255.0, 87.0, 0.0, 87.0]),
+    (5.0 * 60.0, [255.0, 123.0, 0.0, 123.0]),
+    (20.0 * 60.0, [255.0, 123.0, 0.0, 160.0]),
+    // (40.0, [255.0, 255.0, 255.0, 255.0]),
+];
+
+const PLANT_LIGHT: [f32; 4] = [255.0, 255.0, 255.0, 255.0];
+const IN_BED_LIGHT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+const EVENING_LIGHT: [f32; 4] = [255.0, 123.0, 0.0, 160.0];
+const DITHER: [u32; 32] = [
+    9, 3, 13, 7, 1, 10, 4, 14, 8, 2, 11, 5, 15, 9, 3, 13, 6, 0, 10, 4, 14, 7, 1, 11, 5, 15, 8, 2,
+    12, 6, 0, 10,
+];
+
+#[derive(PartialEq, Eq, Debug, Clone, serde::Serialize, serde::Deserialize, Hash)]
+struct InnerAlarmState {
+    next_alarm: DateTime<Utc>,
+    enabled: bool,
+}
+
+async fn async_main() -> Result<(), EspError> {
     let peripherals = Peripherals::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
@@ -91,7 +139,9 @@ async fn async_main() -> anyhow::Result<()> {
         )?,
         peripherals.pins.gpio2,
     )?);
-    debug_led.blink(5, Duration::from_millis(50)).await?;
+    debug_led.blink(4, Duration::from_millis(50)).await?;
+
+    successful_boot();
 
     let mac = start_wifi(
         peripherals.modem,
@@ -108,29 +158,69 @@ async fn async_main() -> anyhow::Result<()> {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
+    let ntp = EspSntp::new_default().unwrap();
+
     info!("Creating storage...");
 
     let device_id = format!("{MQTT_CLIENT_ID} {mac_str}");
-    let storage = SyncStorage::new(&device_id, MQTT_HOST, MQTT_USERNAME, MQTT_PASSWORD).await;
+    let storage = SyncStorage::new(
+        &device_id,
+        MQTT_HOST,
+        MQTT_USERNAME,
+        MQTT_PASSWORD,
+        brevduva::SessionPersistance::Persistent,
+    )
+    .await;
 
     info!("Containers...");
 
+    ota_flasher::downloader::initialize_ota(&storage, &device_id, env!("BUILD_ID")).await;
+
+    let alarm_state = storage
+        .add_container_with_mode(
+            "alarm/state",
+            InnerAlarmState {
+                next_alarm: Default::default(),
+                enabled: false,
+            },
+            SerializationFormat::Auto,
+            ReadWriteMode::ReadOnly,
+        )
+        .await
+        .unwrap();
     let is_user_in_bed = storage
-        .add_container("alarm/+/is_user_in_bed", false)
+        .add_container_with_mode(
+            "alarm/+/is_user_in_bed",
+            false,
+            SerializationFormat::Auto,
+            ReadWriteMode::ReadOnly,
+        )
         .await
         .unwrap();
     let is_playing = storage
-        .add_container("alarm/+/is_playing", false)
+        .add_container_with_mode(
+            "alarm/+/is_playing",
+            false,
+            SerializationFormat::Auto,
+            ReadWriteMode::ReadOnly,
+        )
         .await
         .unwrap();
 
     let lights = storage
-        .add_container(&format!("lights/{device_id}/rgba"), Some([0, 0, 0, 0]))
+        .add_container(
+            &format!("lights/{device_id}/rgba"),
+            Some([0, 0, 0, 0]),
+            SerializationFormat::Auto,
+        )
         .await
         .unwrap();
 
-    let reboot = storage
-        .add_container("lights/+/reboot", false)
+    let (status_channel, _) = storage
+        .add_channel::<String>(
+            &format!("lights/{device_id}/status"),
+            SerializationFormat::String,
+        )
         .await
         .unwrap();
 
@@ -144,27 +234,20 @@ async fn async_main() -> anyhow::Result<()> {
 
     debug_led.blink(1, Duration::from_millis(100)).await?;
 
+    // Wait until we have current time from network
+    while ntp.get_sync_status() != esp_idf_svc::sntp::SyncStatus::Completed {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    debug_led.blink(2, Duration::from_millis(40)).await?;
+
     storage.wait_for_sync().await;
 
     debug_led.blink(10, Duration::from_millis(20)).await?;
 
-    reboot.set(false).await;
+    status_channel.send(format!("Starting...")).await;
 
     info!("Loop...");
-
-    // [255,20,0,0]
-    // [255,30,0,30]
-    // [255,60,0,60]
-    // On: [255,255,255,255]
-
-    let animations = &[
-        (0.0f32, [0.0, 0.0, 0.0, 0.0]),
-        (1.0 * 60.0, [255.0, 70.0, 0.0, 0.0]),
-        (3.0 * 60.0, [255.0, 87.0, 0.0, 87.0]),
-        (5.0 * 60.0, [255.0, 123.0, 0.0, 123.0]),
-        (20.0 * 60.0, [255.0, 123.0, 0.0, 160.0]),
-        // (40.0, [255.0, 255.0, 255.0, 255.0]),
-    ];
 
     fn lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         let mut res = [0.0; 4];
@@ -174,46 +257,81 @@ async fn async_main() -> anyhow::Result<()> {
         res
     }
 
-    let get_wakup_color = move |t: f32| {
-        for i in 0..animations.len() - 1 {
-            let (at, ac) = animations[i];
-            let (bt, bc) = animations[i + 1];
+    fn get_wakup_color(t: f32) -> [f32; 4] {
+        for i in 0..SUNRISE_ANIMATION.len() - 1 {
+            let (at, ac) = SUNRISE_ANIMATION[i];
+            let (bt, bc) = SUNRISE_ANIMATION[i + 1];
             if t >= at && t < bt {
                 return lerp(ac, bc, (t - at) / (bt - at));
             }
         }
-        animations.last().unwrap().1
-    };
+        SUNRISE_ANIMATION.last().unwrap().1
+    }
 
     let mut last = Instant::now();
     let mut wakeup_start = None;
+    let mut last_played_time = None;
 
-    let plant_light = [255.0, 255.0, 255.0, 255.0];
-    let in_bed_light = [0.0, 0.0, 0.0, 0.0];
     let mut current_color: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
     let fade_speed = 0.2;
 
-    let dither: &[u32; 32] = &[
-        9, 3, 13, 7, 1, 10, 4, 14, 8, 2, 11, 5, 15, 9, 3, 13, 6, 0, 10, 4, 14, 7, 1, 11, 5, 15, 8,
-        2, 12, 6, 0, 10,
-    ];
+    let mut last_color = [0, 0, 0, 0];
+
+    // TODO: Figure out how to set the local timezone
+    let tz = FixedOffset::east_opt(3600 * 2).unwrap();
 
     for it in 0.. {
         let t = Instant::now();
         let dt = t - last;
         last = t;
 
-        let mut target_color = plant_light;
+        let now = Utc::now().with_timezone(&tz);
+        let is_evening = now.hour() >= 17;
+
+        let mut target_color = if is_evening {
+            EVENING_LIGHT
+        } else {
+            PLANT_LIGHT
+        };
         if is_playing.get().unwrap() {
             if wakeup_start.is_none() {
                 wakeup_start = Some(Instant::now());
+                last_played_time = Some(Instant::now());
+                status_channel
+                    .send("Detected alarm is playing".to_string())
+                    .await;
             }
             target_color = get_wakup_color(wakeup_start.unwrap().elapsed().as_secs_f32());
         } else {
-            wakeup_start = None;
+            if wakeup_start.is_some() {
+                wakeup_start = None;
+                status_channel
+                    .send("Detected alarm stopped playing".to_string())
+                    .await;
+            }
 
-            if is_user_in_bed.get().unwrap() {
-                target_color = in_bed_light;
+            let alarm_state_mutex = alarm_state.get();
+            let alarm_state_v = alarm_state_mutex.as_ref().unwrap();
+            let alarm_set_soon = alarm_state_v.enabled
+                && alarm_state_v
+                    .next_alarm
+                    .signed_duration_since(&now)
+                    .num_hours()
+                    < 12;
+
+            let is_night = now.hour() < 11 || now.hour() > 22;
+            let alarm_played_recently = last_played_time
+                .map(|v| v.elapsed() < Duration::from_secs(30 * 60))
+                .unwrap_or(false);
+
+            // Disable light:
+            // - during nighttime
+            // - when the user is in bed
+            // - if an alarm is set to some time within the next few hours (likely that the user is in bed)
+            // - if the alarm was finished relatively recently (make sure the user has enough time to get out of bed).
+            if is_night || is_user_in_bed.get().unwrap() || alarm_set_soon || alarm_played_recently
+            {
+                target_color = IN_BED_LIGHT;
             }
         }
 
@@ -232,20 +350,26 @@ async fn async_main() -> anyhow::Result<()> {
         }
 
         if it % 100 == 0 {
-            println!(
-                "{:?} {:?} {:?}",
-                current_color,
-                target_color, // dt.as_secs_f32() * fade_speed
-                gamma,
-            );
-            // debug_led.blink(1, Duration::from_millis(10)).await?;
-            // debug_led.set_duty(gamma[0] as f32 / 2048.0).unwrap();
+            let status = format!("{:?} {:?} {:?}", current_color, target_color, gamma);
+            println!("{}", status);
         }
+
+        if it % 1000 == 0 {
+            status_channel
+                .send(format!("{} Target: {target_color:?}", now.to_rfc3339()))
+                .await;
+        }
+
+        if gamma == last_color && it != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        last_color = gamma;
 
         let pixels = std::iter::repeat(gamma)
             .enumerate()
             .map(|(i, col)| {
-                let r = dither[i % dither.len()];
+                let r = DITHER[i % DITHER.len()];
                 const SCALING: u32 = 2048 / 128;
                 RGBW8::new_alpha(
                     ((col[0] + r) / SCALING) as u8,
@@ -255,71 +379,12 @@ async fn async_main() -> anyhow::Result<()> {
                 )
             })
             .take(144);
+
         // let t_write = Instant::now();
         ws2812.write(pixels).unwrap();
         // println!("{:?} {:?}", dt, t_write.elapsed());
         // tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // let mut previous = [0, 0, 0, 0];
-    // let mut current;
-    // for (duration, col) in animations {
-    //     let dur = Duration::from_secs(*duration);
-
-    //     loop {
-    //         let t = start.elapsed();
-    //         if t > dur {
-    //             break;
-    //         }
-    //         current = lerp(previous, *col, t.as_secs_f32() / dur.as_secs_f32());
-
-    //         let pixel_col = RGBW8::new_alpha(current[0], current[1], current[2], White(current[3]));
-    //         let pixels = std::iter::repeat(pixel_col).take(144 + 60);
-    //         ws2812.write(pixels).unwrap();
-    //         tokio::time::sleep(Duration::from_millis(20)).await;
-    //     }
-
-    //     previous = *col;
-    // }
-
-    info!("Up to date. Starting to update...");
-
-    let pin = peripherals.pins.gpio17;
-    let timer_driver = LedcTimerDriver::new(
-        peripherals.ledc.timer0,
-        &TimerConfig::default().frequency(5.kHz().into()),
-    )
-    .unwrap();
-    let mut driver = LedcDriver::new(peripherals.ledc.channel0, timer_driver, pin)?;
-    driver.set_duty(0)?;
-
-    let max_duty = driver.get_max_duty();
-    println!("Max duty: {}", max_duty);
-
-    let mut light = 0.0;
-    let mut last_time = Instant::now();
-    loop {
-        let t = Instant::now();
-        let dt = t - last_time;
-        last_time = t;
-
-        let is_user_in_bed = is_user_in_bed.get().unwrap();
-        let is_playing = is_playing.get().unwrap();
-
-        let (desired, speed) = match (is_user_in_bed, is_playing) {
-            (true, true) => (0.8, 0.1),
-            (true, false) => (0.0, 0.4),
-            (false, _) => (1.0, 0.1),
-        };
-
-        light = light + (desired - light) * speed * dt.as_secs_f32();
-        println!("Light: {light}. {is_user_in_bed}, {is_playing}");
-
-        driver.set_duty(((max_duty as f32) * light) as u32)?;
-
-        // Sleep using tokio
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     Ok(())

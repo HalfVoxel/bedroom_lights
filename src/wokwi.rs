@@ -1,7 +1,10 @@
-use esp_idf_svc::hal::gpio::{self, PinDriver};
+use esp_idf_svc::{
+    hal::gpio::{self, PinDriver},
+    sys::EspError,
+};
 use log::info;
 
-pub fn check_is_wokwi() -> anyhow::Result<bool> {
+pub fn check_is_wokwi() -> Result<bool, EspError> {
     let wokwi_pin = unsafe { gpio::Gpio5::new() };
     let mut driver = PinDriver::input(wokwi_pin)?;
     driver.set_pull(gpio::Pull::Up)?;

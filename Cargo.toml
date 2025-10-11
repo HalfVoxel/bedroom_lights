@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Aron Granberg <aron.granberg@gmail.com>"]
 edition = "2021"
 resolver = "2"
-rust-version = "1.77"
+rust-version = "1.81"
 
 [[bin]]
 name = "bedroom_lights3"
@@ -13,45 +13,54 @@ harness = false          # do not use the built in cargo test harness -> resolve
 [profile.release]
 opt-level = "s"
 # strip = "none"
-strip = true # Automatically strip symbols from the binary.
+strip = false # Automatically strip symbols from the binary.
 lto = true
+# panic = "abort"
+debug = true
+codegen-units = 1
 
 [profile.dev]
-debug = true    # Symbols are nice and they don't increase the size on Flash
+debug = true    # Symbols are nice and they dont increase the size on Flash
 opt-level = "z"
 
 [features]
 default = ["std", "embassy", "esp-idf-svc/native"]
 
-pio = ["esp-idf-svc/pio"]
 std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
 alloc = ["esp-idf-svc/alloc"]
 nightly = ["esp-idf-svc/nightly"]
 experimental = ["esp-idf-svc/experimental"]
 embassy = [
     "esp-idf-svc/embassy-sync",
-    "esp-idf-svc/critical-section",
-    "esp-idf-svc/embassy-time-driver",
+    # "esp-idf-svc/critical-section",
+    # "esp-idf-svc/embassy-time-driver",
 ]
 
 [dependencies]
-log = { version = "0.4", default-features = false }
-esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", default-features = false }
+# release_max_level_debug
+log = { version = "0.4", default-features = false, features = [] }
+# esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", default-features = false }
+esp-idf-svc = { version = "0.51", default-features = false }
 # esp-idf-sys = { version = "0.35", features = ["binstart"] }
-anyhow = "1.0"
+thiserror = "2.0"
 serde = { version = "*", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 sync_common = { path = "../sync_common" }
 embassy-futures = "0.1"
 brevduva = { git = "https://github.com/HalfVoxel/brevduva.git", features = [
     "embedded",
 ] }
+embedded-svc = { version = "0.28", default-features = false, features = ["std", "log"] }
 smart-leds = "*"
 smart-leds-trait = { version = "*" }
-ws2812-esp32-rmt-driver = { version = "*", features = ["smart-leds-trait"] }
+ws2812-esp32-rmt-driver = { version = "0.12", features = ["smart-leds-trait"] }
+ota_flasher = { path = "../ota_flasher", features = ["embedded"] }
+# embassy-executor = { version = "*", features = ["arch-std"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [patch.crates-io]
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
+# esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
+ws2812-esp32-rmt-driver = { path = "../ws2812-esp32-rmt-driver" }
 
 # Patch esp-idf-svc dependency
 # [patch.crates-io.esp-idf-svc]
@@ -65,4 +74,5 @@ esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
 # esp-hal = { version = "0.19", features = ["esp32"] }
 
 [build-dependencies]
-embuild = "0.32.0"
+embuild = "0.33.1"
+chrono = "0.4"
