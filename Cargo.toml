@@ -45,7 +45,7 @@ esp-idf-svc = { version = "0.51", default-features = false }
 thiserror = "2.0"
 serde = { version = "*", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
-sync_common = { path = "../sync_common" }
+# sync_common = { path = "../sync_common" }
 embassy-futures = "0.1"
 brevduva = { git = "https://github.com/HalfVoxel/brevduva.git", features = [
     "embedded",
@@ -53,14 +53,14 @@ brevduva = { git = "https://github.com/HalfVoxel/brevduva.git", features = [
 embedded-svc = { version = "0.28", default-features = false, features = ["std", "log"] }
 smart-leds = "*"
 smart-leds-trait = { version = "*" }
-ws2812-esp32-rmt-driver = { version = "0.12", features = ["smart-leds-trait"] }
+# ws2812-esp32-rmt-driver = { version = "0.12", features = ["smart-leds-trait"] }
 ota_flasher = { path = "../ota_flasher", features = ["embedded"] }
 # embassy-executor = { version = "*", features = ["arch-std"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [patch.crates-io]
 # esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
-ws2812-esp32-rmt-driver = { path = "../ws2812-esp32-rmt-driver" }
+# ws2812-esp32-rmt-driver = { path = "../ws2812-esp32-rmt-driver" }
 
 # Patch esp-idf-svc dependency
 # [patch.crates-io.esp-idf-svc]

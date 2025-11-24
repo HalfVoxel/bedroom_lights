@@ -32,8 +32,8 @@ use log::{info, warn};
 use smart_leds::RGB8;
 use wifi::start_wifi;
 use wokwi::check_is_wokwi;
-use ws2812_esp32_rmt_driver::driver::color::LedPixelColorGrb24;
-use ws2812_esp32_rmt_driver::LedPixelEsp32Rmt;
+// use ws2812_esp32_rmt_driver::driver::color::LedPixelColorGrb24;
+// use ws2812_esp32_rmt_driver::LedPixelEsp32Rmt;
 
 const MQTT_HOST: &str = "mqtt://arongranberg.com:1883";
 const MQTT_CLIENT_ID: &str = "bedroom_lights";
@@ -723,7 +723,7 @@ async fn async_main() -> Result<(), EspError> {
 
     let led_pin = peripherals.pins.gpio32; // TODO: 33
     let channel = peripherals.rmt.channel0;
-    let mut ws2812 = LedPixelEsp32Rmt::<RGB8, LedPixelColorGrb24>::new(channel, led_pin).unwrap();
+    // let mut ws2812 = LedPixelEsp32Rmt::<RGB8, LedPixelColorGrb24>::new(channel, led_pin).unwrap();
 
     info!("Waiting for sync...");
 
