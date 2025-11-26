@@ -176,10 +176,10 @@ const SUNRISE_ANIMATION_RGBW: &[(f32, [f32; 4])] = &[
 
 const SUNRISE_ANIMATION: &[(f32, [f32; 4])] = &[
     (0.0, [0.0, 0.0, 0.0, 0.0]),
-    (1.0 * 60.0, [0.0, 0.0, 120.0, 0.0]),
-    (3.0 * 60.0, [10.0, 87.0, 200.0, 0.0]),
-    (5.0 * 60.0, [100.0, 123.0, 255.0, 0.0]),
-    (20.0 * 60.0, [150.0, 200.0, 255.0, 0.0]),
+    (1.0 * 60.0, [0.0, 0.0, 100.0, 0.0]),
+    (3.0 * 60.0, [0.0, 50.0, 140.0, 0.0]),
+    (5.0 * 60.0, [20.0, 100.0, 180.0, 0.0]),
+    (20.0 * 60.0, [150.0, 100.0, 200.0, 0.0]),
 ];
 
 const DITHER: [u32; 32] = [
@@ -747,6 +747,7 @@ async fn async_main() -> Result<(), EspError> {
     let mut last = Instant::now();
     let mut wakeup_start = None;
     let mut last_played_time = None;
+    let mut last_played_trigger_time = None;
 
     let mut current_color: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
     let fade_speed = 0.2;
@@ -767,6 +768,7 @@ async fn async_main() -> Result<(), EspError> {
         {
             let now = Utc::now().with_timezone(&tz);
             let is_evening = now.hour() >= 17;
+            let is_morning = now.hour() < 11;
 
             target_color = if is_evening {
                 evening_light_color.get().unwrap().into()
@@ -785,6 +787,7 @@ async fn async_main() -> Result<(), EspError> {
                 if wakeup_start.is_none() {
                     wakeup_start = Some(Instant::now());
                     last_played_time = Some(Instant::now());
+                    last_played_trigger_time = Some(alarm_state_v.next_alarm.clone());
                     status_channel
                         .send("Detected alarm is playing".to_string())
                         .await;
@@ -810,8 +813,11 @@ async fn async_main() -> Result<(), EspError> {
 
                 let is_night = now.hour() < 11 || now.hour() > 22;
 
-                if alarm_played_recently && alarm_state_v.enabled {
-                    // When the alarm was played recently and is still enabled,
+                if alarm_played_recently
+                    && alarm_state_v.enabled
+                    && last_played_trigger_time == Some(alarm_state_v.next_alarm)
+                {
+                    // When the alarm was played recently and is still enabled with the same trigger time,
                     // assume the user has snoozed.
                     target_color = snooze_light_color.get().unwrap().into();
                 } else if is_night || alarm_set_soon || alarm_played_recently {
@@ -822,7 +828,7 @@ async fn async_main() -> Result<(), EspError> {
                     // - if the alarm was finished relatively recently (make sure the user has enough time to get out of bed).
                     target_color = in_bed_light_color.get().unwrap().into();
                 } else if is_user_in_bed.get().unwrap() {
-                    if is_evening {
+                    if is_evening || is_morning {
                         target_color = in_bed_light_color.get().unwrap().into();
                     } else {
                         // If the user is in bed during daytime, set a soft light to
